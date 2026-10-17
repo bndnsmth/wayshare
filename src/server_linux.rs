@@ -412,26 +412,63 @@ impl HpBackend for LinuxHp {
 /// Applies msg 29 to a Hyprland output and restores the original mode afterwards.
 pub struct HyprDisplay {
     output: String,
+    resize: bool,
+    exclusive: Option<Mutex<crate::display::exclusive::ExclusiveDesktop>>,
     /// Session that changed the mode, and the mode to restore.
     owner: Mutex<Option<(SessionId, crate::display::OutputInfo)>>,
 }
 
 impl HyprDisplay {
-    pub fn new(output: String) -> Self {
+    pub fn new(output: String, resize: bool, exclusive: bool) -> Self {
         Self {
             output,
+            resize,
+            exclusive: exclusive.then(Mutex::default),
             owner: Mutex::new(None),
         }
+    }
+
+    fn restore_mode(&self, session: SessionId) -> Result<()> {
+        use crate::display::DisplayManager;
+        let original = {
+            let mut owner = self.owner.lock().unwrap();
+            match owner.take() {
+                Some((s, info)) if s == session => info,
+                other => {
+                    *owner = other;
+                    return Ok(());
+                }
+            }
+        };
+        let mut hypr = crate::display::hyprland::Hyprland::from_env()?;
+        let actual = hypr.set_mode(&self.output, &original.mode())?;
+        info!(output = %self.output, ?actual, "output mode restored");
+        Ok(())
     }
 }
 
 impl crate::rfb::DisplayControl for HyprDisplay {
+    fn session_started(&self, session: SessionId) -> Result<()> {
+        if let Some(exclusive) = &self.exclusive {
+            let mut hypr = crate::display::hyprland::Hyprland::from_env()?;
+            exclusive
+                .lock()
+                .unwrap()
+                .acquire(session, &self.output, &mut hypr)?;
+            info!(session, output = %self.output, "exclusive display acquired");
+        }
+        Ok(())
+    }
+
     fn configure(
         &self,
         session: SessionId,
         request: &crate::display::apple::DisplayRequest,
     ) -> Result<Option<crate::rfb::AppliedDisplay>> {
         use crate::display::DisplayManager;
+        if !self.resize {
+            return Ok(None);
+        }
         let Some(pref) = request.displays.first().and_then(|d| d.preferred()) else {
             return Ok(None);
         };
@@ -470,21 +507,14 @@ impl crate::rfb::DisplayControl for HyprDisplay {
     }
 
     fn restore(&self, session: SessionId) -> Result<()> {
-        use crate::display::DisplayManager;
-        let original = {
-            let mut owner = self.owner.lock().unwrap();
-            match owner.take() {
-                Some((s, info)) if s == session => info,
-                other => {
-                    *owner = other;
-                    return Ok(());
-                }
-            }
+        let resized = self.restore_mode(session);
+        // Always release exclusive ownership, even if restoring the shared mode failed.
+        let exclusive = match &self.exclusive {
+            Some(exclusive) => crate::display::hyprland::Hyprland::from_env()
+                .and_then(|mut hypr| exclusive.lock().unwrap().release(session, &mut hypr)),
+            None => Ok(()),
         };
-        let mut hypr = crate::display::hyprland::Hyprland::from_env()?;
-        let actual = hypr.set_mode(&self.output, &original.mode())?;
-        info!(output = %self.output, ?actual, "output mode restored");
-        Ok(())
+        resized.and(exclusive)
     }
 }
 

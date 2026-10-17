@@ -24,6 +24,29 @@ resize = true            # match the Mac's window size, restore the monitor afte
 With `resize` on, wayshare switches the shared monitor to the mode the Mac asks for while
 you're connected, and puts it back when you disconnect.
 
+## Exclusive display
+
+To use only the shared monitor while connected, add this at the top level:
+
+```toml
+output = "DP-1"
+exclusive = true
+```
+
+After the first viewer authenticates, wayshare saves the monitor layout, workspace
+assignments and focus, then disables the other enabled monitors. Hyprland moves their
+workspaces onto the shared monitor. After the last viewer disconnects, wayshare re-enables
+the original monitors and moves surviving workspaces back. Already-disabled monitors stay
+disabled; unplugged monitors and closed workspaces are skipped. Monitors plugged in during
+sharing are left alone.
+
+This is off by default, requires `output`, and works in Standard and High Performance mode,
+independently of `resize`. Session errors and graceful server shutdown also restore the
+desktop. A process abort or SIGKILL cannot run cleanup: `hyprctl reload` recovers the
+configured monitor layout, but not the saved workspace assignments.
+
+The flags `--exclusive` and `--no-exclusive` override the setting.
+
 ## Login
 
 `wayshare set-password` stores a salted verifier, never the password, in `srp-$USER` next to
