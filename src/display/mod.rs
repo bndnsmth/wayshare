@@ -39,7 +39,6 @@ pub struct OutputInfo {
     pub focused: bool,
     pub disabled: bool,
     pub transform: u32,
-    pub vrr: bool,
     pub active_workspace: Option<i64>,
 }
 

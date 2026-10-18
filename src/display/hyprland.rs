@@ -194,7 +194,7 @@ fn lua_string(value: &str) -> String {
 fn restore_output_command(output: &OutputInfo) -> Result<String> {
     check_name(&output.name)?;
     Ok(format!(
-        "eval hl.monitor({{ output = {}, disabled = false, mode = \"{}x{}@{}\", position = \"{}x{}\", scale = {}, transform = {}, vrr = {} }})",
+        "eval hl.monitor({{ output = {}, disabled = false, mode = \"{}x{}@{}\", position = \"{}x{}\", scale = {}, transform = {} }})",
         lua_string(&output.name),
         output.width,
         output.height,
@@ -203,7 +203,6 @@ fn restore_output_command(output: &OutputInfo) -> Result<String> {
         output.y,
         fmt_num(output.scale),
         output.transform,
-        u8::from(output.vrr),
     ))
 }
 
@@ -278,7 +277,6 @@ pub fn parse_monitors(json: &str) -> Result<Vec<OutputInfo>> {
                 focused: m["focused"].as_bool().unwrap_or(false),
                 disabled: m["disabled"].as_bool().unwrap_or(false),
                 transform: m["transform"].as_u64().unwrap_or(0) as u32,
-                vrr: m["vrr"].as_bool().unwrap_or(false),
                 active_workspace: m["activeWorkspace"]["id"].as_i64(),
             })
         })
@@ -372,12 +370,14 @@ impl DesktopManager for Hyprland {
         let mut errors = Vec::new();
         let mut expected = Vec::new();
         for output in snapshot.outputs.iter().filter(|o| !o.disabled) {
-            // Do not invent outputs for monitors unplugged during the connection.
-            if !current.iter().any(|o| o.name == output.name) {
-                continue;
-            }
+            // Rules survive unplugging. Clear disabled=true even for absent outputs,
+            // without waiting for them or creating an output, so replugging works.
             match restore_output_command(output).and_then(|cmd| self.ok(&cmd)) {
-                Ok(()) => expected.push(output.clone()),
+                Ok(()) => {
+                    if current.iter().any(|o| o.name == output.name) {
+                        expected.push(output.clone());
+                    }
+                }
                 Err(e) => errors.push(format!("restoring {}: {e:#}", output.name)),
             }
         }
@@ -495,7 +495,7 @@ mod tests {
                         "name": o.name, "width": o.width, "height": o.height,
                         "refreshRate": o.refresh_hz, "scale": o.scale, "x": o.x, "y": o.y,
                         "focused": o.focused, "disabled": o.disabled, "transform": o.transform,
-                        "vrr": o.vrr, "activeWorkspace": { "id": o.active_workspace },
+                        "activeWorkspace": { "id": o.active_workspace },
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -546,7 +546,6 @@ mod tests {
         let mut outputs = parse_monitors(MONITORS).unwrap();
         outputs[0].active_workspace = Some(1);
         outputs[0].transform = 1;
-        outputs[0].vrr = true;
         outputs[1].active_workspace = Some(2);
         DesktopSnapshot {
             workspaces: outputs
@@ -576,6 +575,44 @@ mod tests {
         assert_eq!(snapshot.outputs, saved.outputs);
         assert_eq!(snapshot.workspaces[0].selector(), "1");
         assert_eq!(snapshot.workspaces[0].monitor, "HEADLESS-1");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn restore_does_not_convert_active_vrr_into_a_configured_policy() {
+        let mut json: Value = serde_json::from_str(MONITORS).unwrap();
+        let original = parse_monitors(MONITORS).unwrap();
+        for active in [false, true] {
+            json[0]["vrr"] = Value::Bool(active);
+            let outputs = parse_monitors(&json.to_string()).unwrap();
+            assert_eq!(outputs, original);
+            let command = restore_output_command(&outputs[0]).unwrap();
+            assert_eq!(
+                command,
+                r#"eval hl.monitor({ output = "HEADLESS-1", disabled = false, mode = "3456x2160@60", position = "0x0", scale = 2, transform = 0 })"#
+            );
+            assert!(!command.contains("vrr"));
+        }
+    }
+
+    #[test]
+    fn unplugged_outputs_get_enabled_rules_without_waiting_for_replug() {
+        let saved = saved_desktop();
+        let (mut hypr, thread) = fake_ipc(vec![
+            ("j/monitors all".into(), "[]".into()),
+            (
+                restore_output_command(&saved.outputs[0]).unwrap(),
+                "ok".into(),
+            ),
+            (
+                restore_output_command(&saved.outputs[1]).unwrap(),
+                "ok".into(),
+            ),
+            ("j/monitors all".into(), "[]".into()),
+            ("j/monitors all".into(), "[]".into()),
+            ("j/workspaces".into(), "[]".into()),
+        ]);
+        hypr.restore_desktop(&saved).unwrap();
         thread.join().unwrap();
     }
 
@@ -617,6 +654,7 @@ mod tests {
             ("j/monitors all".into(), monitors_json(&disabled)),
             (restore_output_command(&saved.outputs[0]).unwrap(), "ok".into()),
             (restore_output_command(&saved.outputs[1]).unwrap(), "ok".into()),
+            (restore_output_command(&saved.outputs[2]).unwrap(), "ok".into()),
             ("j/monitors all".into(), ready.clone()),
             ("j/monitors all".into(), ready),
             ("j/workspaces".into(), r#"[{"id":1,"name":"1","monitor":"ARDTEST-1"},{"id":2,"name":"2","monitor":"ARDTEST-1"},{"id":3,"name":"3","monitor":"ARDTEST-1"},{"id":5,"name":"new","monitor":"ARDTEST-1"}]"#.into()),

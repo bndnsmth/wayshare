@@ -37,8 +37,16 @@ After the first viewer authenticates, wayshare saves the monitor layout, workspa
 assignments and focus, then disables the other enabled monitors. Hyprland moves their
 workspaces onto the shared monitor. After the last viewer disconnects, wayshare re-enables
 the original monitors and moves surviving workspaces back. Already-disabled monitors stay
-disabled; unplugged monitors and closed workspaces are skipped. Monitors plugged in during
-sharing are left alone.
+disabled. Restore rules are also sent for unplugged monitors so they are enabled again
+when replugged, but wayshare does not wait for absent monitors or move workspaces onto
+them. Closed workspaces are skipped; monitors added during sharing are left alone.
+
+wayshare uses exact-output-name monitor rules. Existing rules for the same output name
+retain settings that wayshare does not change, including the configured VRR mode.
+Settings inherited from `desc:` or fallback rules can instead be shadowed by these runtime
+rules: bit depth, color management, mirroring, reserved areas and per-monitor VRR may fall
+back to defaults. Use explicit output-name rules to avoid this limitation, or run
+`hyprctl reload` afterwards to recover the configured rules.
 
 This is off by default, requires `output`, and works in Standard and High Performance mode,
 independently of `resize`. Session errors and graceful server shutdown also restore the

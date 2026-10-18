@@ -77,7 +77,8 @@ impl ExclusiveDesktop {
         for output in others {
             if let Err(error) = manager.disable_output(&output) {
                 let error = error.context(format!("disabling output {output}"));
-                return match self.release(session, manager) {
+                self.release(session);
+                return match self.restore(manager) {
                     Ok(()) => Err(error),
                     Err(rollback) => {
                         Err(error.context(format!("desktop rollback also failed: {rollback:#}")))
@@ -88,15 +89,13 @@ impl ExclusiveDesktop {
         Ok(())
     }
 
-    pub fn release(&mut self, session: SessionId, manager: &mut impl DesktopManager) -> Result<()> {
+    /// Forget the viewer without compositor access. Returns whether restoration is due.
+    pub fn release(&mut self, session: SessionId) -> bool {
         self.viewers.remove(&session);
-        if self.viewers.is_empty() {
-            self.restore(manager)?;
-        }
-        Ok(())
+        self.viewers.is_empty() && self.saved.is_some()
     }
 
-    fn restore(&mut self, manager: &mut impl DesktopManager) -> Result<()> {
+    pub fn restore(&mut self, manager: &mut impl DesktopManager) -> Result<()> {
         if let Some(snapshot) = &self.saved {
             manager
                 .restore_desktop(snapshot)
@@ -131,7 +130,6 @@ mod tests {
             focused: x == 0,
             disabled: false,
             transform: 0,
-            vrr: false,
             active_workspace: Some(if x == 0 { 1 } else { 2 }),
         }
     }
@@ -197,6 +195,17 @@ mod tests {
         }
     }
 
+    fn disconnect(
+        exclusive: &mut ExclusiveDesktop,
+        session: SessionId,
+        manager: &mut impl DesktopManager,
+    ) -> Result<()> {
+        if exclusive.release(session) {
+            exclusive.restore(manager)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn restores_monitors_and_workspaces_only_after_last_viewer() {
         let mut manager = desktop();
@@ -208,13 +217,13 @@ mod tests {
         assert_eq!(manager.state.workspaces[0].monitor, "DP-2");
         exclusive.acquire(2, "DP-2", &mut manager).unwrap();
         exclusive.acquire(2, "DP-2", &mut manager).unwrap();
-        exclusive.release(99, &mut manager).unwrap();
-        exclusive.release(1, &mut manager).unwrap();
+        disconnect(&mut exclusive, 99, &mut manager).unwrap();
+        disconnect(&mut exclusive, 1, &mut manager).unwrap();
         assert_eq!(manager.log, ["snapshot", "disable DP-1"]);
-        exclusive.release(2, &mut manager).unwrap();
+        disconnect(&mut exclusive, 2, &mut manager).unwrap();
         assert_eq!(manager.state.outputs, original.outputs);
         assert_eq!(manager.state.workspaces, original.workspaces);
-        exclusive.release(2, &mut manager).unwrap();
+        disconnect(&mut exclusive, 2, &mut manager).unwrap();
         assert_eq!(manager.log, ["snapshot", "disable DP-1", "restore"]);
     }
 
@@ -224,7 +233,7 @@ mod tests {
             let mut manager = desktop();
             let mut exclusive = ExclusiveDesktop::default();
             assert!(exclusive.acquire(1, name, &mut manager).is_err());
-            exclusive.release(1, &mut manager).unwrap();
+            disconnect(&mut exclusive, 1, &mut manager).unwrap();
             assert_eq!(manager.log, ["snapshot"]);
         }
     }
@@ -241,7 +250,7 @@ mod tests {
         assert_eq!(manager.log, ["snapshot", "disable DP-1", "restore"]);
         manager.fail_disable = None;
         exclusive.acquire(2, "DP-2", &mut manager).unwrap();
-        exclusive.release(2, &mut manager).unwrap();
+        disconnect(&mut exclusive, 2, &mut manager).unwrap();
     }
 
     #[test]
@@ -253,7 +262,7 @@ mod tests {
         let error = exclusive.acquire(1, "DP-2", &mut manager).unwrap_err();
         assert!(format!("{error:#}").contains("rollback also failed"));
         manager.fail_restore = false;
-        exclusive.release(1, &mut manager).unwrap();
+        disconnect(&mut exclusive, 1, &mut manager).unwrap();
         assert!(!manager.state.outputs[0].disabled);
         assert!(manager.state.outputs[2].disabled);
     }
@@ -265,12 +274,12 @@ mod tests {
         let mut exclusive = ExclusiveDesktop::default();
         exclusive.acquire(1, "DP-2", &mut manager).unwrap();
         manager.fail_restore = true;
-        assert!(exclusive.release(1, &mut manager).is_err());
+        assert!(disconnect(&mut exclusive, 1, &mut manager).is_err());
         assert!(exclusive.acquire(2, "DP-2", &mut manager).is_err());
         assert_eq!(manager.log.iter().filter(|s| *s == "snapshot").count(), 1);
         manager.fail_restore = false;
         exclusive.acquire(3, "DP-2", &mut manager).unwrap();
-        exclusive.release(3, &mut manager).unwrap();
+        disconnect(&mut exclusive, 3, &mut manager).unwrap();
         assert_eq!(manager.state.outputs, original);
     }
 
@@ -299,7 +308,7 @@ mod tests {
         }
         impl Drop for LiveDesktop {
             fn drop(&mut self) {
-                if let Err(e) = self.exclusive.release(1, &mut self.manager) {
+                if let Err(e) = disconnect(&mut self.exclusive, 1, &mut self.manager) {
                     eprintln!("live test cleanup failed: {e:#}; recover with hyprctl reload");
                 }
             }
@@ -320,7 +329,7 @@ mod tests {
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].name, shared);
         assert!(during.workspaces.iter().all(|w| w.monitor == shared));
-        live.exclusive.release(1, &mut live.manager).unwrap();
+        disconnect(&mut live.exclusive, 1, &mut live.manager).unwrap();
         let after = live.manager.snapshot().unwrap();
         for original in before.outputs.iter().filter(|o| !o.disabled) {
             let restored = after
@@ -335,7 +344,6 @@ mod tests {
             );
             assert!((restored.scale - original.scale).abs() < 1e-3);
             assert_eq!(restored.transform, original.transform);
-            assert_eq!(restored.vrr, original.vrr);
             assert_eq!(restored.focused, original.focused);
         }
         for original in &before.workspaces {
